@@ -2,76 +2,49 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET");
 
-  const TICKERS = "BAESY,HIMS,AMD,GOOGL,ASTS,RKLB,IREN,ABCL,AMZN,TMDX,ONDS,EURUSD=X";
+  const API_KEY = process.env.FINNHUB_API_KEY;
+  if (!API_KEY) return res.status(500).json({ error: "API key no configurada" });
 
-  const HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://finance.yahoo.com",
-    "Referer": "https://finance.yahoo.com/",
-  };
+  // Tickers en formato Finnhub (acciones US usan ticker directo)
+  const TICKERS = ["BAESY","HIMS","AMD","GOOGL","ASTS","RKLB","IREN","ABCL","AMZN","TMDX","ONDS"];
 
-  // Try multiple Yahoo Finance endpoints
-  const ENDPOINTS = [
-    `https://query2.finance.yahoo.com/v8/finance/quote?symbols=${TICKERS}&fields=regularMarketPrice,regularMarketChangePercent,shortName`,
-    `https://query1.finance.yahoo.com/v8/finance/quote?symbols=${TICKERS}&fields=regularMarketPrice,regularMarketChangePercent,shortName`,
-    `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${TICKERS}`,
-    `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${TICKERS}`,
-  ];
+  try {
+    // Obtener EUR/USD primero
+    const fxRes = await fetch(`https://finnhub.io/api/v1/forex/rates?base=USD&token=${API_KEY}`);
+    const fxData = await fxRes.json();
+    const eurUsd = fxData?.quote?.EUR ? 1 / fxData.quote.EUR : 1.08;
 
-  let quotes = [];
+    // Obtener precios de todos los tickers en paralelo
+    const results = await Promise.all(
+      TICKERS.map(async (ticker) => {
+        try {
+          const r = await fetch(`https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${API_KEY}`);
+          const d = await r.json();
+          return { ticker, price: d.c, chg: d.dp, prev: d.pc };
+        } catch {
+          return { ticker, price: null, chg: null };
+        }
+      })
+    );
 
-  for (const endpoint of ENDPOINTS) {
-    try {
-      const response = await fetch(endpoint, { headers: HEADERS });
-      if (!response.ok) continue;
-      const data = await response.json();
-      const result = data?.quoteResponse?.result || [];
-      if (result.length > 0) {
-        quotes = result;
-        break;
+    const prices = {};
+    results.forEach(({ ticker, price, chg }) => {
+      if (price && price > 0) {
+        prices[ticker] = {
+          eur: +(price / eurUsd).toFixed(2),
+          usd: +price.toFixed(2),
+          chg: chg != null ? +chg.toFixed(2) : null,
+        };
       }
-    } catch {
-      continue;
-    }
+    });
+
+    res.status(200).json({
+      eurUsd: +eurUsd.toFixed(4),
+      updatedAt: new Date().toISOString(),
+      prices,
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  if (quotes.length === 0) {
-    return res.status(500).json({ error: "No se pudieron obtener precios de Yahoo Finance" });
-  }
-
-  let eurUsd = 1.08;
-  const prices = {};
-
-  quotes.forEach((q) => {
-    if (q.symbol === "EURUSD=X") {
-      eurUsd = q.regularMarketPrice || 1.08;
-      return;
-    }
-    if (q.regularMarketPrice) {
-      prices[q.symbol] = {
-        usd: q.regularMarketPrice,
-        chg: q.regularMarketChangePercent ?? null,
-        name: q.shortName || q.symbol,
-      };
-    }
-  });
-
-  const result = {
-    eurUsd,
-    updatedAt: new Date().toISOString(),
-    prices: {},
-  };
-
-  Object.entries(prices).forEach(([symbol, d]) => {
-    result.prices[symbol] = {
-      eur: +(d.usd / eurUsd).toFixed(2),
-      usd: +d.usd.toFixed(2),
-      chg: d.chg !== null ? +d.chg.toFixed(2) : null,
-      name: d.name,
-    };
-  });
-
-  res.status(200).json(result);
 }
